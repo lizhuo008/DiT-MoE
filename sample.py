@@ -7,6 +7,7 @@
 """
 Sample new images from a pre-trained DiT-MoE.
 """
+import os
 import torch
 torch.backends.cuda.matmul.allow_tf32 = True
 torch.backends.cudnn.allow_tf32 = True
@@ -16,6 +17,7 @@ from diffusers.models import AutoencoderKL
 from download import find_model
 from models import DiT_models
 from diffusion.rectified_flow import RectifiedFlow 
+from tqdm import tqdm
 import argparse
 
 
@@ -79,66 +81,86 @@ def main(args):
     vae = AutoencoderKL.from_pretrained(args.vae_path).to(device) 
     
     # Labels to condition the model with (feel free to change):
-    class_labels = [207, 360, 387, 974, 88, 979, 417, 279]
+    # class_labels = [207, 360, 387, 974, 88, 979, 417, 279]
+    model_string_name = args.model.replace("/", "-")
+    ckpt_string_name = os.path.basename(args.ckpt).replace(".pt", "") if args.ckpt else "pretrained"
+    folder_name = f"{model_string_name}-{ckpt_string_name}-size-{args.image_size}-" \
+                  f"cfg-{args.cfg_scale}-seed-{args.seed}-singlegpu"
+    sample_folder_dir = f"{args.sample_dir}/{folder_name}"
+    os.makedirs(sample_folder_dir, exist_ok=True)
+    print(f"Saving .png samples at {sample_folder_dir}")
+    
+    iterations = args.num_fid_samples
+    pbar = range(iterations)
+    pbar = tqdm(pbar) 
+    
+    numbers = torch.arange(args.num_classes)
+    numbers_repeated = numbers.repeat_interleave(args.num_fid_samples // args.num_classes)
+    numbers_rank = numbers_repeated.to(device)
+    n = 1
+    for i in pbar:
+        # Create sampling noise:
+        # n = len(class_labels)
+        class_labels = numbers_rank[i * n: (i + 1) * n]
+        z = torch.randn(n, 4, latent_size, latent_size, device=device)
+        y = torch.tensor(class_labels, device=device)
 
-    # Create sampling noise:
-    n = len(class_labels)
-    z = torch.randn(n, 4, latent_size, latent_size, device=device)
-    y = torch.tensor(class_labels, device=device)
+        # Setup classifier-free guidance:
+        z = torch.cat([z, z], 0)
+        y_null = torch.tensor([1000] * n, device=device)
+        y = torch.cat([y, y_null], 0)
+        model_kwargs = dict(y=y, cfg_scale=args.cfg_scale)
 
-    # Setup classifier-free guidance:
-    z = torch.cat([z, z], 0)
-    y_null = torch.tensor([1000] * n, device=device)
-    y = torch.cat([y, y_null], 0)
-    model_kwargs = dict(y=y, cfg_scale=args.cfg_scale)
-
-    if dtype == torch.float16: 
-        if args.rf: 
-            with torch.autocast(device_type='cuda'):
-                STEPSIZE = 50
-                init_noise = torch.randn(n, 4, latent_size, latent_size, device=device) 
-                conds = torch.tensor(class_labels, device=device)
-                images = diffusion.sample_with_xps(init_noise, conds, null_cond = torch.tensor([1000] * n).cuda(), sample_steps = STEPSIZE, cfg = 7.0)
-                samples = vae.decode(images[-1] / 0.18215).sample
+        if dtype == torch.float16: 
+            if args.rf: 
+                with torch.autocast(device_type='cuda'):
+                    STEPSIZE = 50
+                    init_noise = torch.randn(n, 4, latent_size, latent_size, device=device) 
+                    conds = torch.tensor(class_labels, device=device)
+                    images = diffusion.sample_with_xps(init_noise, conds, null_cond = torch.tensor([1000] * n).cuda(), sample_steps = STEPSIZE, cfg = 1.5)
+                    samples = vae.decode(images[-1] / 0.18215).sample
+            
+            else:
+                with torch.autocast(device_type='cuda'):
+                    samples = diffusion.p_sample_loop(
+                        model.forward_with_cfg, z.shape, z, clip_denoised=False, model_kwargs=model_kwargs, progress=True, device=device
+                    )
+                samples, _ = samples.chunk(2, dim=0)  # Remove null class samples
+                samples = vae.decode(samples / 0.18215).sample
         
         else:
-            with torch.autocast(device_type='cuda'):
-                samples = diffusion.p_sample_loop(
+            samples = diffusion.p_sample_loop(
                     model.forward_with_cfg, z.shape, z, clip_denoised=False, model_kwargs=model_kwargs, progress=True, device=device
                 )
             samples, _ = samples.chunk(2, dim=0)  # Remove null class samples
             samples = vae.decode(samples / 0.18215).sample
+
+        
+        # Save and display images: 
+        if args.model == "DiT-S/2":
+            save_image(samples, "sample_s.png", nrow=4, normalize=True, value_range=(-1, 1))
+        elif args.model == "DiT-B/2":
+            save_image(samples, "sample_b.png", nrow=4, normalize=True, value_range=(-1, 1))
+        elif args.model == "DiT-XL/2":
+            save_image(samples, f"{sample_folder_dir}/{i:06d}.png", nrow=4, normalize=True, value_range=(-1, 1)) 
+        else:
+            save_image(samples, "sample_g.png", nrow=4, normalize=True, value_range=(-1, 1)) 
     
-    else:
-        samples = diffusion.p_sample_loop(
-                model.forward_with_cfg, z.shape, z, clip_denoised=False, model_kwargs=model_kwargs, progress=True, device=device
-            )
-        samples, _ = samples.chunk(2, dim=0)  # Remove null class samples
-        samples = vae.decode(samples / 0.18215).sample
-
-    # Save and display images: 
-    if args.model == "DiT-S/2":
-        save_image(samples, "sample_s.png", nrow=4, normalize=True, value_range=(-1, 1))
-    elif args.model == "DiT-B/2":
-        save_image(samples, "sample_b.png", nrow=4, normalize=True, value_range=(-1, 1))
-    elif args.model == "DiT-XL/2":
-        save_image(samples, "sample_xl.png", nrow=4, normalize=True, value_range=(-1, 1)) 
-    else:
-        save_image(samples, "sample_g.png", nrow=4, normalize=True, value_range=(-1, 1)) 
-
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--model", type=str, choices=list(DiT_models.keys()), default="DiT-G/2")
     parser.add_argument("--vae-path", type=str, default="/maindata/data/shared/multimodal/zhengcong.fei/ckpts/sd-vae-ft-mse")
     parser.add_argument("--image-size", type=int, choices=[256, 512], default=256)
+    parser.add_argument("--sample-dir", type=str, default="samples")
     parser.add_argument("--num-classes", type=int, default=1000)
     parser.add_argument("--cfg-scale", type=float, default=4.0)
     parser.add_argument('--num_experts', default=16, type=int,) 
     parser.add_argument('--num_experts_per_tok', default=2, type=int,) 
     parser.add_argument("--num-sampling-steps", type=int, default=250)
+    parser.add_argument("--num-fid-samples", type=int, default=5000)
     parser.add_argument("--seed", type=int, default=2024)
     parser.add_argument("--ckpt", type=str, default=None, )
-    parser.add_argument("--rf", type=bool, default=True) 
+    parser.add_argument("--rf", action='store_true')
     args = parser.parse_args()
     main(args) 
