@@ -1,3 +1,16 @@
+### 💥 Evaluation toolit Usage
+
+Evaluation tools and datasets are available from [Open AI](https://github.com/openai/guided-diffusion), which is consistent with the evaluation method disclosed in DiT.
+
+In order to maintain the consistency of the code, we made as few adjustments as possible, modifying the [`sample.py`](sample.py) file to iteratively generate multiple images and ensure that the categories of the generated images are uniform.
+
+By running the [`run.sh`](run.sh) script, you can complete sample generation and evaluation. It should be noted that you need to customize the number of samples according to your needs.
+
+```bash
+bash run.sh
+```
+---
+
 ## Scaling Diffusion Transformers with Mixture of Experts <br><sub>Official PyTorch Implementation</sub>
 
 [![arXiv](https://img.shields.io/badge/arXiv-2407.11633-b31b1b.svg)](https://arxiv.org/abs/2407.11633)
